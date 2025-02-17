@@ -2,26 +2,32 @@
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Running;
+using EfBenchmark.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
 public class Program
 {
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         // Seed the database if needed
-        /*
-        using (var context = new AppDbContext(DbType.Postgres))
+
+        await using (var context = new AppDbContext(DbType.Postgres))
         {
-            SeedDatabase(context).GetAwaiter().GetResult();
+            if (!await context.Books.AnyAsync())
+            {
+                await SeedDatabase(context);
+            }
         }
-        */
 
         var config = DefaultConfig.Instance
             .WithSummaryStyle(BenchmarkDotNet.Reports.SummaryStyle.Default.WithMaxParameterColumnWidth(20))
             .WithOption(ConfigOptions.DisableOptimizationsValidator, true);
 
-        BenchmarkRunner.Run<EfCoreBenchmarks>(config);
+        /*
+        BenchmarkRunner.Run<AsSplitQueryBenchmark>(config);
+        */
+        BenchmarkRunner.Run<AsNoTrackingBenchmark>(config);
     }
 
 public static async Task SeedDatabase(AppDbContext context)
@@ -136,80 +142,6 @@ public static async Task SeedDatabase(AppDbContext context)
 }
 }
 
-public class Author
-{
-    public int Id { get; set; }
-    public string Name { get; set; }
-    public List<Book> Books { get; set; } // One author has many books (100+)
-    public List<Achievement> Achievements { get; set; } // Each author has many achievements (20+)
-}
-
-public class Book
-{
-    public int Id { get; set; }
-    public string Title { get; set; }
-    public int AuthorId { get; set; }
-    public Author Author { get; set; }
-    public List<Chapter> Chapters { get; set; } // Each book has many chapters (30+)
-    public List<Review> Reviews { get; set; } // Each book has many reviews (1000+)
-}
-
-public class Chapter
-{
-    public int Id { get; set; }
-    public string Title { get; set; }
-    public int BookId { get; set; }
-    public Book Book { get; set; }
-    public List<Comment> Comments { get; set; } // Each chapter has many comments (500+)
-}
-
-public class Review
-{
-    public int Id { get; set; }
-    public string Content { get; set; }
-    public int BookId { get; set; }
-    public Book Book { get; set; }
-    public List<ReviewReaction> Reactions { get; set; } // Each review has many reactions (100+)
-}
-
-public class Comment
-{
-    public int Id { get; set; }
-    public string Content { get; set; }
-    public int ChapterId { get; set; }
-    public Chapter Chapter { get; set; }
-    public List<CommentReaction> Reactions { get; set; } // Each comment has many reactions (50+)
-}
-
-public class Achievement
-{
-    public int Id { get; set; }
-    public string Title { get; set; }
-    public int AuthorId { get; set; }
-    public Author Author { get; set; }
-}
-
-public class ReviewReaction
-{
-    public int Id { get; set; }
-    public string Type { get; set; } // Like, Love, Wow etc.
-    public int ReviewId { get; set; }
-    public Review Review { get; set; }
-}
-
-public class CommentReaction
-{
-    public int Id { get; set; }
-    public string Type { get; set; }
-    public int CommentId { get; set; }
-    public Comment Comment { get; set; }
-}
-
-public enum DbType
-{
-    Postgres,
-    //can add any other type of db for testing purposes
-}
 
 public class AppDbContext : DbContext
 {
@@ -299,11 +231,11 @@ public class AppDbContext : DbContext
 
 [MemoryDiagnoser]
 [ShortRunJob]
-public class EfCoreBenchmarks
+public class AsSplitQueryBenchmark
 {
     private readonly AppDbContext _context;
 
-    public EfCoreBenchmarks()
+    public AsSplitQueryBenchmark()
     {
         _context = new AppDbContext(DbType.Postgres);
     }
@@ -312,15 +244,17 @@ public class EfCoreBenchmarks
     public async Task GetAuthorDetails_WithoutSplitQuery()
     {
         //times out 
-        var author = await _context.Authors
+        await _context.Authors
             .Include(a => a.Achievements)
             .Include(a => a.Books)
                 .ThenInclude(b => b.Chapters)
-                .ThenInclude(c => c.Comments)
-                .ThenInclude(c => c.Reactions)
+                //.ThenInclude(c => c.Comments)
+                //.ThenInclude(c => c.Reactions)
+            /*
             .Include(a => a.Books)
                 .ThenInclude(b => b.Reviews)
                 .ThenInclude(r => r.Reactions)
+            */
             .FirstOrDefaultAsync(a => a.Id == 101);
     }
 
@@ -328,16 +262,78 @@ public class EfCoreBenchmarks
     public async Task GetAuthorDetails_WithSplitQuery()
     {
         //takes about 14 seconds to finish
-        var author = await _context.Authors
+        await _context.Authors
             .AsSplitQuery()
             .Include(a => a.Achievements)
             .Include(a => a.Books)
-            .ThenInclude(b => b.Chapters)
-            .ThenInclude(c => c.Comments)
-            .ThenInclude(c => c.Reactions)
+                .ThenInclude(b => b.Chapters)
+                //.ThenInclude(c => c.Comments)
+                //.ThenInclude(c => c.Reactions)
+            /*
             .Include(a => a.Books)
-            .ThenInclude(b => b.Reviews)
-            .ThenInclude(r => r.Reactions)
+                .ThenInclude(b => b.Reviews)
+                .ThenInclude(r => r.Reactions)
+            */
             .FirstOrDefaultAsync(a => a.Id == 101);
+    }
+}
+
+[MemoryDiagnoser]
+public class AsNoTrackingBenchmark
+{
+    private readonly AppDbContext _context;
+
+    public AsNoTrackingBenchmark()
+    {
+        _context = new AppDbContext(DbType.Postgres);
+    }
+
+    /*
+    [Benchmark]
+    public async Task GetAuthorDetails_WithoutAsNoTracking_FirstOrDefault()
+    {
+        //times out 
+        await _context.Authors
+            .Include(a => a.Achievements)
+            .Include(a => a.Books)
+                //.ThenInclude(item => item.Chapters)
+            .Include(a => a.Books)
+            .FirstOrDefaultAsync(a => a.Id == 101);
+    }
+
+    [Benchmark]
+    public async Task GetAuthorDetails_WithAsNoTracking_FirstOrDefault()
+    {
+        //takes about 14 seconds to finish
+        await _context.Authors
+            .AsNoTracking()
+            .Include(a => a.Achievements)
+            .Include(a => a.Books)
+                //.ThenInclude(item => item.Chapters)
+            .Include(a => a.Books)
+            .FirstOrDefaultAsync(a => a.Id == 101);
+    }
+    */
+    
+    [Benchmark]
+    public async Task GetAuthorDetails_WithoutAsNoTracking_ToList()
+    {
+        //times out 
+        await _context.Authors
+            .Include(a => a.Achievements)
+            .Include(a => a.Books)
+                .ThenInclude(item => item.Chapters)
+            .ToListAsync();
+    }
+
+    [Benchmark]
+    public async Task GetAuthorDetails_WithAsNoTracking_ToList()
+    {
+        await _context.Authors
+            .AsNoTracking()
+            .Include(a => a.Achievements)
+            .Include(a => a.Books)
+                .ThenInclude(item => item.Chapters)
+            .ToListAsync();
     }
 }
